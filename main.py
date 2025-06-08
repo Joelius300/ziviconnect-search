@@ -12,8 +12,8 @@ from auth import auth_session
 from consts import LANG_CODES, SPECIAL_AUSLAND, MAX_SEARCH_LEN, TKB_CODES
 
 
-def main(bearer_token: str, raw_cookie: str):
-    res = search(bearer_token, raw_cookie)
+def main(bearer_token: str, raw_cookie: str, *, max_perm_len=3, allow_partial: Optional[list[str]] = None):
+    res = search(bearer_token, raw_cookie, max_perm_len, allow_partial)
 
     with open("data/phs.json", "wt", encoding="utf-8") as file:
         json.dump(res, file, indent=2, ensure_ascii=False)
@@ -21,7 +21,9 @@ def main(bearer_token: str, raw_cookie: str):
     print(res)
 
 
-def search(bearer_token: str, raw_cookie: str) -> list[PHSearchItem]:
+def search(
+    bearer_token: str, raw_cookie: str, max_perm_len: int, allow_partial: Optional[list[str]]
+) -> list[PHSearchItem]:
     # muss speziell gesucht werden, weil es in der API response nicht vorkommt (weder search noch PH selbst)
     #  - Sprache
     #  - Spezial Ausland
@@ -43,12 +45,12 @@ def search(bearer_token: str, raw_cookie: str) -> list[PHSearchItem]:
             for taetigkeit, taetigkeit_id in TKB_CODES.items():
                 # no need to augment response, already contains taetigkeit
                 t.set_description(f"Fetching {taetigkeit} PHs")
-                
+
                 # these are just too big, cannot guarantee that we get everything with this brute-force technique,
                 # so just return what we can get in the best effort.
-                return_part = taetigkeit in ("gesundheit", )
-                
-                taet = search_over_lang(s, taetigkeit=taetigkeit_id, return_part=return_part)
+                return_part = allow_partial is not None and ("all" in allow_partial or taetigkeit in allow_partial)
+
+                taet = search_over_lang(s, taetigkeit=taetigkeit_id, return_part=return_part, max_perm_len=max_perm_len)
                 phs.extend(taet)
                 t.update(len(taet))
 
@@ -77,7 +79,7 @@ def search_over_lang(
     *,
     taetigkeit: Optional[int] = None,
     special_code: Optional[str] = None,
-    min_perm_len=2,
+    min_perm_len=1,
     max_perm_len=4,
     return_part=False,
 ) -> list[PHSearchItem]:
@@ -94,7 +96,9 @@ def search_over_lang(
         )
         out.extend(ph | dict(sprache=lang) for ph in part)
 
-    assert not has_duplicates(out), "Duplicates when varying just the language = multi-language PH found"
+    # TODO this doesn't work when brute-forcing of course
+    #  Instead create a set of ids and a set of (id, lang) tuples and compare length; can also be done at end
+    # assert not has_duplicates(out), "Duplicates when varying just the language = multi-language PH found"
 
     return out
 
@@ -105,7 +109,7 @@ def search_with_brute_force(
     lang_id: Optional[int] = None,
     taetigkeit: Optional[int] = None,
     special_code: Optional[str] = None,
-    min_perm_len=2,
+    min_perm_len=1,
     max_perm_len=4,
     return_part=False,
 ) -> list[PHSearchItem]:
@@ -116,27 +120,24 @@ def search_with_brute_force(
     if min_perm_len <= 0 or max_perm_len <= 0:
         raise ValueError(f"Disabled brute forcing but got more than {MAX_SEARCH_LEN} items.")
 
-    assert max_perm_len > min_perm_len, "Invalid min/max perm_len config"
+    assert max_perm_len >= min_perm_len, "Invalid min/max perm_len config"
 
     # there are probably more results, so initiate brute force search
-    with tqdm() as t:
-        for perm_len in range(min_perm_len, max_perm_len + 1):
-            t.set_description(f"Brute-forcing with perm {perm_len}")
-            # if return_part is True, and we're in the last iteration,
-            # don't check the length, just do the perm and return what you got
-            check_len = (not return_part) or perm_len < max_perm_len
-            out = search_perm(
-                requests,
-                perm_len,
-                lang_id=lang_id,
-                taetigkeit=taetigkeit,
-                special_code=special_code,
-                pbar=t,
-                check_len=check_len,
-            )
-            
-            if out is not None:
-                return out
+    for perm_len in range(min_perm_len, max_perm_len + 1):
+        # if return_part is True, and we're in the last iteration,
+        # don't check the length, just do the perm and return what you got
+        check_len = (not return_part) or perm_len < max_perm_len
+        out = search_perm(
+            requests,
+            perm_len,
+            lang_id=lang_id,
+            taetigkeit=taetigkeit,
+            special_code=special_code,
+            check_len=check_len,
+        )
+
+        if out is not None:
+            return out
 
     raise ValueError(f"Even after extensively searching with perms of len {max_perm_len}, it found huge chunks; abort")
 
@@ -148,7 +149,6 @@ def search_perm(
     lang_id: Optional[int] = None,
     taetigkeit: Optional[int] = None,
     special_code: Optional[str] = None,
-    pbar: Optional[tqdm] = None,
     check_len=True,
 ) -> list[PHSearchItem] | None:
     """
@@ -156,10 +156,13 @@ def search_perm(
     Unless check_len is False, then it will keep going until the permutations are finished.
     """
     out = []
-    for s in itertools.permutations(string.ascii_lowercase, perm_len):
+    for s in tqdm(
+        itertools.permutations(string.ascii_lowercase, perm_len),
+        desc=f"Brute-forcing with perm-len {perm_len}",
+        total=26**perm_len,
+    ):
         term = "".join(s)
         part = _search(requests, lang_id=lang_id, text=term, taetigkeit=taetigkeit, special_code=special_code)
-        pbar.update(len(part))
         if check_len and len(part) >= MAX_SEARCH_LEN:
             return None
         out.extend(part)
@@ -168,8 +171,16 @@ def search_perm(
 
 
 def deduplicate(phs: list[PHSearchItem]):
-    ids = set(ph["pflichtenheftId"] for ph in phs)
-    return [ph for ph in phs if ph["pflichtenheftId"] not in ids]
+    out = []
+    ids = set()
+    for ph in phs:
+        id = ph["pflichtenheftId"]
+        if id in ids:
+            continue
+        ids.add(id)
+        out.append(ph)
+
+    return out
 
 
 def has_duplicates(phs: list[PHSearchItem]):

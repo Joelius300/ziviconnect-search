@@ -1,5 +1,6 @@
 import itertools
 import json
+import math
 import string
 from typing import Optional
 
@@ -12,13 +13,13 @@ from auth import auth_session
 from consts import LANG_CODES, SPECIAL_AUSLAND, MAX_SEARCH_LEN, TKB_CODES
 
 
-def main(bearer_token: str, raw_cookie: str, *, max_perm_len=3, allow_partial: Optional[list[str]] = None):
+def main(bearer_token: str, raw_cookie: str, *, max_perm_len=2, allow_partial: Optional[list[str]] = None):
     res = search(bearer_token, raw_cookie, max_perm_len, allow_partial)
 
     with open("data/phs.json", "wt", encoding="utf-8") as file:
         json.dump(res, file, indent=2, ensure_ascii=False)
 
-    print(res)
+    print(f"Fetched {len(res)} Pflichtenhefte")
 
 
 def search(
@@ -127,7 +128,7 @@ def search_with_brute_force(
         # if return_part is True, and we're in the last iteration,
         # don't check the length, just do the perm and return what you got
         check_len = (not return_part) or perm_len < max_perm_len
-        out = search_perm(
+        part, search_aborted = search_perm(
             requests,
             perm_len,
             lang_id=lang_id,
@@ -135,9 +136,11 @@ def search_with_brute_force(
             special_code=special_code,
             check_len=check_len,
         )
+        
+        out.extend(part)
 
-        if out is not None:
-            return out
+        if not search_aborted:
+            return deduplicate(out)
 
     raise ValueError(f"Even after extensively searching with perms of len {max_perm_len}, it found huge chunks; abort")
 
@@ -150,24 +153,32 @@ def search_perm(
     taetigkeit: Optional[int] = None,
     special_code: Optional[str] = None,
     check_len=True,
-) -> list[PHSearchItem] | None:
+) -> tuple[list[PHSearchItem], bool]:
     """
-    Returns a list if all went well, return None if a search returned 150 -> search probably not specific enough.
-    Unless check_len is False, then it will keep going until the permutations are finished.
+    Returns a list of search results and a flag whether the process was aborted because a search resulted in more items than 150.
     """
     out = []
+    perm_set = string.ascii_lowercase
+    set_len = len(perm_set)
     for s in tqdm(
-        itertools.permutations(string.ascii_lowercase, perm_len),
+        itertools.product(perm_set, repeat=perm_len),
+        # itertools.permutations(perm_set, perm_len),
         desc=f"Brute-forcing with perm-len {perm_len}",
-        total=26**perm_len,
+        total=set_len**perm_len,
+        # total=math.factorial(set_len) // math.factorial(set_len - perm_len),
     ):
         term = "".join(s)
         part = _search(requests, lang_id=lang_id, text=term, taetigkeit=taetigkeit, special_code=special_code)
-        if check_len and len(part) >= MAX_SEARCH_LEN:
-            return None
         out.extend(part)
+        
+        if check_len and len(part) >= MAX_SEARCH_LEN:
+            if len(out) > MAX_SEARCH_LEN:
+                # no need to deduplicate if it was just one search result and then it ended
+                out = deduplicate(out)
 
-    return deduplicate(out)
+            return out, True
+
+    return deduplicate(out), False
 
 
 def deduplicate(phs: list[PHSearchItem]):

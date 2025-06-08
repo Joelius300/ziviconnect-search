@@ -161,10 +161,12 @@ def search_perm(
     perm_set = string.ascii_lowercase
     set_len = len(perm_set)
     for s in tqdm(
-        itertools.product(perm_set, repeat=perm_len),
+        itertools.combinations(perm_set, perm_len),
+        # itertools.product(perm_set, repeat=perm_len),
         # itertools.permutations(perm_set, perm_len),
         desc=f"Brute-forcing with perm-len {perm_len}",
-        total=set_len**perm_len,
+        total=math.comb(set_len, perm_len),
+        # total=set_len**perm_len,
         # total=math.factorial(set_len) // math.factorial(set_len - perm_len),
     ):
         term = "".join(s)

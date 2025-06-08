@@ -1,0 +1,11 @@
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.14
+    container_name: meilisearch
+    ports:
+      - "7700:7700"
+    volumes:
+      - meili_data:/meili_data
+
+volumes:
+  meili_data:

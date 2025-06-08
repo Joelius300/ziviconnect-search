@@ -1,4 +1,4 @@
-# ~~Scheiss Ziviconnect~~
+# ~~Scheiss ZiviConnect~~
 
 > ds militär isch viu schlimmer aber boa isch das ä scheiss app
 

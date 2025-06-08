@@ -1,88 +1,204 @@
-from typing import cast
+import itertools
+import json
+import string
+from typing import Optional
 
 import fire
 import requests
+from tqdm import tqdm
 
-from api_types import SearchResults, PHSearchItem
-from consts import LANG_CODES
+from api_types import PHSearchItem
+from auth import auth_session
+from consts import LANG_CODES, SPECIAL_AUSLAND, MAX_SEARCH_LEN, TKB_CODES
 
 
 def main(bearer_token: str, raw_cookie: str):
     res = search(bearer_token, raw_cookie)
 
+    with open("data/phs.json", "wt", encoding="utf-8") as file:
+        json.dump(res, file, indent=2, ensure_ascii=False)
+
     print(res)
 
-    ph_ids = {lang: [ph["pflichtenheftId"] for ph in res[lang]] for lang in LANG_CODES.keys()}
 
-    all_ids = [id for ids in ph_ids.values() for id in ids]
-
-    sets = [set(l) for l in ph_ids.values()]
-
-    list_lens = [len(l) for l in ph_ids.values()]
-    set_lens = [len(s) for s in sets]
-
-    for i in range(len(list_lens)):
-        assert list_lens[i] == set_lens[i], f"Duplicates found in langauge at index {i}"
-
-    # number of unique ph across all searches
-    len_all = len(set(all_ids))
-    # number of unique ph per language summed up
-    len_separate = sum(set_lens)
-    if len_separate > len_all:
-        print("There are PH with multiple languages!")
-    else:
-        print("No multi-language PHs")
-
-    print(sorted(all_ids))
-
-
-def bake_cookies(raw_cookie: str):
-    return dict(cookie.split("=", 1) for cookie in raw_cookie.split("; "))
-
-
-def auth_session(bearer_token: str, raw_cookie: str):
-    s = requests.Session()
-    s.headers["Authorization"] = f"Bearer {bearer_token}"
-    s.headers.update(
-        {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "x-zivi-locale": "de-CH",
-        }
-    )
-    s.cookies.update(bake_cookies(raw_cookie))
-
-    return s
-
-
-def search(bearer_token: str, raw_cookie: str) -> SearchResults:
+def search(bearer_token: str, raw_cookie: str) -> list[PHSearchItem]:
+    # muss speziell gesucht werden, weil es in der API response nicht vorkommt (weder search noch PH selbst)
+    #  - Sprache
+    #  - Spezial Ausland
+    #  - Spezial Lager
+    #  - Umkreissuche theoretisch -> ableitbar von Adresse
+    phs: list[PHSearchItem] = []
     with auth_session(bearer_token, raw_cookie) as s:
-        res = {}
-        for lang, lang_id in LANG_CODES.items():
-            res[lang] = _search(s, lang_id)
+        with tqdm() as t:
+            t.set_description("Fetching Ausland PHs")
+            ausland = get_ausland(s)
+            phs.extend(ausland)
+            t.update(len(ausland))
 
-    return cast(SearchResults, res)
+            t.set_description("Fetching Lager PHs")
+            lager = get_lager(s)
+            phs.extend(lager)
+            t.update(len(lager))
+
+            for taetigkeit, taetigkeit_id in TKB_CODES.items():
+                # no need to augment response, already contains taetigkeit
+                t.set_description(f"Fetching {taetigkeit} PHs")
+                
+                # these are just too big, cannot guarantee that we get everything with this brute-force technique,
+                # so just return what we can get in the best effort.
+                return_part = taetigkeit in ("gesundheit", )
+                
+                taet = search_over_lang(s, taetigkeit=taetigkeit_id, return_part=return_part)
+                phs.extend(taet)
+                t.update(len(taet))
+
+    return deduplicate(phs)
 
 
-def fetch_ph(ph_id: int) -> dict:
+# neither special code should need brute forcing, not many of them
+def get_ausland(rq_ses: requests.Session) -> list[PHSearchItem]:
+    l = search_over_lang(rq_ses, special_code=SPECIAL_AUSLAND, max_perm_len=0)
+    return [ph | dict(ausland=True) for ph in l]
+
+
+def get_lager(rq_ses: requests.Session) -> list[PHSearchItem]:
+    l = search_over_lang(rq_ses, special_code=SPECIAL_AUSLAND, max_perm_len=0)
+    return [ph | dict(lager=True) for ph in l]
+
+
+def fetch_ph(requests: requests.Session, ph_id: int) -> dict:
     return requests.get(
         f"https://ziviconnect.admin.ch/web-zdp/api/pflichtenheft/{ph_id}",
     ).json()
 
 
-def _search(requests: requests.Session, lang_id: int) -> PHSearchItem:
+def search_over_lang(
+    requests: requests.Session,
+    *,
+    taetigkeit: Optional[int] = None,
+    special_code: Optional[str] = None,
+    min_perm_len=2,
+    max_perm_len=4,
+    return_part=False,
+) -> list[PHSearchItem]:
+    out: list[PHSearchItem] = []
+    for lang, lang_id in LANG_CODES.items():
+        part = search_with_brute_force(
+            requests,
+            lang_id=lang_id,
+            taetigkeit=taetigkeit,
+            special_code=special_code,
+            min_perm_len=min_perm_len,
+            max_perm_len=max_perm_len,
+            return_part=return_part,
+        )
+        out.extend(ph | dict(sprache=lang) for ph in part)
+
+    assert not has_duplicates(out), "Duplicates when varying just the language = multi-language PH found"
+
+    return out
+
+
+def search_with_brute_force(
+    requests: requests.Session,
+    *,
+    lang_id: Optional[int] = None,
+    taetigkeit: Optional[int] = None,
+    special_code: Optional[str] = None,
+    min_perm_len=2,
+    max_perm_len=4,
+    return_part=False,
+) -> list[PHSearchItem]:
+    out = _search(requests, lang_id=lang_id, taetigkeit=taetigkeit, special_code=special_code)
+    if len(out) < MAX_SEARCH_LEN:
+        return out
+
+    if min_perm_len <= 0 or max_perm_len <= 0:
+        raise ValueError(f"Disabled brute forcing but got more than {MAX_SEARCH_LEN} items.")
+
+    assert max_perm_len > min_perm_len, "Invalid min/max perm_len config"
+
+    # there are probably more results, so initiate brute force search
+    with tqdm() as t:
+        for perm_len in range(min_perm_len, max_perm_len + 1):
+            t.set_description(f"Brute-forcing with perm {perm_len}")
+            # if return_part is True, and we're in the last iteration,
+            # don't check the length, just do the perm and return what you got
+            check_len = (not return_part) or perm_len < max_perm_len
+            out = search_perm(
+                requests,
+                perm_len,
+                lang_id=lang_id,
+                taetigkeit=taetigkeit,
+                special_code=special_code,
+                pbar=t,
+                check_len=check_len,
+            )
+            
+            if out is not None:
+                return out
+
+    raise ValueError(f"Even after extensively searching with perms of len {max_perm_len}, it found huge chunks; abort")
+
+
+def search_perm(
+    requests: requests.Session,
+    perm_len: int,
+    *,
+    lang_id: Optional[int] = None,
+    taetigkeit: Optional[int] = None,
+    special_code: Optional[str] = None,
+    pbar: Optional[tqdm] = None,
+    check_len=True,
+) -> list[PHSearchItem] | None:
+    """
+    Returns a list if all went well, return None if a search returned 150 -> search probably not specific enough.
+    Unless check_len is False, then it will keep going until the permutations are finished.
+    """
+    out = []
+    for s in itertools.permutations(string.ascii_lowercase, perm_len):
+        term = "".join(s)
+        part = _search(requests, lang_id=lang_id, text=term, taetigkeit=taetigkeit, special_code=special_code)
+        pbar.update(len(part))
+        if check_len and len(part) >= MAX_SEARCH_LEN:
+            return None
+        out.extend(part)
+
+    return deduplicate(out)
+
+
+def deduplicate(phs: list[PHSearchItem]):
+    ids = set(ph["pflichtenheftId"] for ph in phs)
+    return [ph for ph in phs if ph["pflichtenheftId"] not in ids]
+
+
+def has_duplicates(phs: list[PHSearchItem]):
+    ids = [ph["pflichtenheftId"] for ph in phs]
+    return len(set(ids)) != len(ids)
+
+
+def _search(
+    requests: requests.Session,
+    *,
+    lang_id: Optional[int] = None,
+    text: Optional[str] = None,
+    taetigkeit: Optional[int] = None,
+    special_code: Optional[str] = None,
+) -> list[PHSearchItem]:
     # purposeful shadowing
     res = requests.post(
         "https://ziviconnect.admin.ch/web-zdp/api/pflichtenheft/search",
         json={
-            "searchText": None,
+            "searchText": text,
             "einsatzortId": None,
             "einsatzdauer": None,
-            "taetigkeitsbereichId": [],
-            "spracheId": [lang_id],
-            "pflichtenheftKennzeichnungSpeziellCodeList": [],
+            "taetigkeitsbereichId": [taetigkeit] if taetigkeit is not None else [],
+            "spracheId": [lang_id] if lang_id is not None else [],
+            "pflichtenheftKennzeichnungSpeziellCodeList": [special_code] if special_code is not None else [],
         },
     )
+
+    res.raise_for_status()
 
     return res.json()
 

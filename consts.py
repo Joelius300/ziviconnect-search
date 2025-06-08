@@ -21,8 +21,11 @@ TKB_CODES = {
     "schulwesen": 3068,
 }
 
+SPECIAL_AUSLAND = "PH_AUSLAND"
+SPECIAL_LAGER = "PH_LAGER"
+
 SPECIAL_CODES = {
-    "ausland": "PH_AUSLAND",
-    "lager": "PH_LAGER",
+    "ausland": SPECIAL_AUSLAND,
+    "lager": SPECIAL_LAGER,
     "schwerpunkt": "PH_SCHWERPUNKT_PROGRAMM",
 }

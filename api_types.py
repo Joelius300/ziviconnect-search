@@ -1,4 +1,4 @@
-from typing import TypedDict, Any
+from typing import TypedDict, Any, NotRequired
 
 
 class Taetigkeitsbereich(TypedDict):
@@ -23,6 +23,10 @@ class PHSearchItem(TypedDict):
     eibName: str
     eibId: int
     merkliste: bool
+    # custom
+    sprache: str
+    ausland: NotRequired[bool]
+    lager: NotRequired[bool]
 
 
 # --- not 1:1 from API ---
@@ -31,9 +35,3 @@ class PHSearchItem(TypedDict):
 class Einsatzbetrieb(TypedDict):
     id: int
     name: str
-
-
-class SearchResults(TypedDict):
-    DE: list[PHSearchItem]
-    FR: list[PHSearchItem]
-    IT: list[PHSearchItem]

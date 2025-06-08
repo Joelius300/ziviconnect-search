@@ -16,12 +16,13 @@ from consts import LANG_CODES, SPECIAL_AUSLAND, MAX_SEARCH_LEN, TKB_CODES
 def main(bearer_token: str, raw_cookie: str, *, max_perm_len=2, allow_partial: Optional[list[str]] = None):
     res = search(bearer_token, raw_cookie, max_perm_len, allow_partial)
 
-    with open("data/phs.json", "wt", encoding="utf-8") as file:
+    with open("data/phs_ids.json", "wt", encoding="utf-8") as file:
         json.dump(res, file, indent=2, ensure_ascii=False)
 
     print(f"Fetched {len(res)} Pflichtenhefte")
 
 
+# could probably parallelize the shit out of this for better performance
 def search(
     bearer_token: str, raw_cookie: str, max_perm_len: int, allow_partial: Optional[list[str]]
 ) -> list[PHSearchItem]:
@@ -67,12 +68,6 @@ def get_ausland(rq_ses: requests.Session) -> list[PHSearchItem]:
 def get_lager(rq_ses: requests.Session) -> list[PHSearchItem]:
     l = search_over_lang(rq_ses, special_code=SPECIAL_AUSLAND, max_perm_len=0)
     return [ph | dict(lager=True) for ph in l]
-
-
-def fetch_ph(requests: requests.Session, ph_id: int) -> dict:
-    return requests.get(
-        f"https://ziviconnect.admin.ch/web-zdp/api/pflichtenheft/{ph_id}",
-    ).json()
 
 
 def search_over_lang(

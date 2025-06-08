@@ -1,5 +1,5 @@
 [project]
-name = "ziviconnect-crawler"
+name = "ziviconnect-search"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

@@ -966,7 +966,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ziviconnect-crawler"
+name = "ziviconnect-search"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
